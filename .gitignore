@@ -1,0 +1,9 @@
+# 运行时状态（含启动 token 等凭据，绝不入库）
+state/
+
+# 本机依赖（junction → dsh profile node_modules，随安装脚本建立）
+node_modules/
+
+# 日志与临时文件
+*.log
+.DS_Store

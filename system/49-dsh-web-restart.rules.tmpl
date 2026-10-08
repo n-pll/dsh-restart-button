@@ -1,0 +1,21 @@
+// 49-dsh-web-restart.rules
+// 目的：允许本机「运行 dsh 的用户」无需交互认证地重启 dsh-web.service，
+//       供 DSH Web 的「重启」按钮插件调用（systemctl restart dsh-web）。
+//
+// 背景：dsh-web 通常由 systemd 托管（Restart=always）；宿主进程以普通用户身份
+//       运行且 NoNewPrivileges=true，无法 sudo；systemd 的 manage-units 默认
+//       auth_admin，而无头机器没有 polkit 认证 agent，故必须显式放行。
+//
+// 收敛范围（最小授权）：仅 action=manage-units、仅一个用户、
+//       仅 unit=dsh-web.service、仅 verb=restart。其余一律 NOT_HANDLED。
+// 注意：unit 必须写**规范 unit 名**（systemd 传的是 Id，别名会不匹配）。
+//
+// 本文件是模板：@DSH_USER@ 由 system/install-rule.sh 替换为实际用户名。
+// 卸载：删除 /etc/polkit-1/rules.d/49-dsh-web-restart.rules 后 systemctl restart polkit。
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") return polkit.Result.NOT_HANDLED;
+    if (subject.user !== "@DSH_USER@") return polkit.Result.NOT_HANDLED;
+    if (action.lookup("unit") !== "dsh-web.service") return polkit.Result.NOT_HANDLED;
+    if (action.lookup("verb") !== "restart") return polkit.Result.NOT_HANDLED;
+    return polkit.Result.YES;
+});
