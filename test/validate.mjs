@@ -143,9 +143,14 @@ const failed = renderWith({ unit: 'dsh-web.service', ruleHint: 'unknown', pendin
   lastRestart: { finishedAt: '2026-10-08T14:00:12.000Z', ok: false, reason: 'restart-not-taken' } });
 ok(failed.text.includes('重启未生效'), '自愈结论在 UI 上可见');
 
-// 清理
-rmSync(STATE, { force: true });
-try { rmSync(PLUG + '/state', { recursive: true, force: true }); } catch {}
+// 清理：还原运行态。测试只借用 state.json，绝不能抹掉宿主真实的 lastRestart 记录。
+if (stateBefore === null) {
+  rmSync(STATE, { force: true });
+  try { rmSync(PLUG + '/state', { recursive: true, force: true }); } catch {}
+} else {
+  writeFileSync(STATE, stateBefore, 'utf8');
+  ok(true, '测试后 state.json 已还原为运行态原值');
+}
 console.log('');
 console.log(fail === 0 ? ('ALL PASS (' + pass + '/' + (pass + fail) + ')') : ('FAILED: ' + fail + ' 项'));
 process.exit(fail === 0 ? 0 : 1);
