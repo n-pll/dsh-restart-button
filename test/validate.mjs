@@ -23,14 +23,15 @@ host.apply({
   webServer: { register: (def) => { routes.push(def); byPath[def.path] = def; return () => {}; } },
   effect: () => { effectRegistered = true; },
 });
-ok(effectRegistered && routes.length === 3, '注册 3 条路由 + ctx.effect');
-ok(routes.map(r => r.path).sort().join(',') === '/api/dsh-restart/restart,/api/dsh-restart/settings,/api/dsh-restart/status', '路径正确');
+ok(effectRegistered && routes.length === 2, '注册 2 条路由 + ctx.effect');
+ok(routes.map(r => r.path).sort().join(',') === '/api/dsh-restart/restart,/api/dsh-restart/status', '路径正确');
 ok(routes.every(r => r.kind === 'exact' && typeof r.handler === 'function'), '全部 exact + handler');
 
 console.log('[4] host 半：HTTP 栅栏（只跑拒绝路径，绝不触发真实重启）');
 const STATE = PLUG + '/state/state.json';
 function mockRes() { const r = { code: null, body: null }; r.writeHead = (c) => { r.code = c; }; r.end = (b) => { r.body = b; }; return r; }
 const mockReq = (m, hdrs, remote) => ({ method: m, headers: hdrs, url: '/', socket: { remoteAddress: remote || '127.0.0.1' }, on: () => {}, destroy: () => {} });
+const mockCtx = () => ({ webServer: { register: () => () => {} }, effect: () => {} });
 const stateBefore = existsSync(STATE) ? readFileSync(STATE, 'utf8') : null;
 for (const [label, req] of [
   ['缺 Origin（DNS rebinding）', mockReq('POST', { host: '127.0.0.1:3099' })],
@@ -43,7 +44,7 @@ for (const [label, req] of [
   ok(res.code === 403, label + ' → 403');
 }
 { const res = mockRes(); await byPath['/api/dsh-restart/restart'].handler(mockReq('GET', { host: '127.0.0.1:3099', origin: 'http://127.0.0.1:3099' }), res); ok(res.code === 405, 'restart GET → 405'); }
-{ const res = mockRes(); await byPath['/api/dsh-restart/settings'].handler(mockReq('PUT', { host: '127.0.0.1:3099' }), res); ok(res.code === 403, 'settings 缺 Origin → 403'); }
+ok(byPath['/api/dsh-restart/settings'] === undefined, '「自动打开新页面」设置端点已移除');
 ok((existsSync(STATE) ? readFileSync(STATE, 'utf8') : null) === stateBefore, '被拒请求未写入 state.json（零副作用）');
 
 console.log('[5] host 半：status 端点 + ruleHint（修复「读不到规则就误拦」的坑）');
@@ -54,23 +55,42 @@ console.log('[5] host 半：status 端点 + ruleHint（修复「读不到规则�
   ok(j.unit === 'dsh-web.service', 'unit = dsh-web.service');
   ok(['readable', 'missing', 'unknown'].includes(j.ruleHint), 'ruleHint 三态合法（实测: ' + j.ruleHint + '）');
   ok(j.ruleHint !== 'missing', 'ruleHint 不误报 missing（目录 0750 → 应为 unknown）');
-  ok(typeof j.autoOpen === 'boolean' && j.settleWindowMs === 20000, 'autoOpen + settleWindowMs 正确');
+  ok(!('autoOpen' in j) && j.settleWindowMs === 20000, '已不含 autoOpen；settleWindowMs 正确');
 }
 
 console.log('[6] host 半：自愈（pending 超窗 ⇒ 判定「重启未生效」）');
 {
   mkdirSync(PLUG + '/state', { recursive: true });
   const old = new Date(Date.now() - 25000).toISOString();
-  writeFileSync(STATE, JSON.stringify({ autoOpen: true, pending: { requestedAt: old, fromUrl: 'http://x/?token=A', autoOpen: true } }), 'utf8');
+  writeFileSync(STATE, JSON.stringify({ pending: { requestedAt: old } }), 'utf8');
   const res = mockRes(); await byPath['/api/dsh-restart/status'].handler(mockReq('GET', { host: '127.0.0.1:3099' }), res);
   const j = JSON.parse(res.body);
   ok(j.pending === false, '超窗 pending 已被自愈清除');
   ok(j.lastRestart && j.lastRestart.ok === false && j.lastRestart.reason === 'restart-not-taken', '结论 = 重启未生效(restart-not-taken)');
 
   const fresh = new Date().toISOString();
-  writeFileSync(STATE, JSON.stringify({ autoOpen: true, pending: { requestedAt: fresh, fromUrl: 'http://x/?token=A', autoOpen: true } }), 'utf8');
+  writeFileSync(STATE, JSON.stringify({ pending: { requestedAt: fresh } }), 'utf8');
   const res2 = mockRes(); await byPath['/api/dsh-restart/status'].handler(mockReq('GET', { host: '127.0.0.1:3099' }), res2);
   ok(JSON.parse(res2.body).pending === true, '窗口内 pending 保持不变（不误判）');
+}
+
+console.log('[6b] host 半：两段式收尾（按进程启动时刻判定，不开新页面）');
+{
+  mkdirSync(PLUG + '/state', { recursive: true });
+  // a) pending 晚于本进程诞生 ⇒ 不是新宿主 ⇒ 原样保留（apply 因热重载重跑不会误判）
+  const future = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  writeFileSync(STATE, JSON.stringify({ pending: { requestedAt: future } }), 'utf8');
+  host.apply(mockCtx());
+  ok(JSON.parse(readFileSync(STATE, 'utf8')).pending !== null, 'pending 晚于进程启动 ⇒ 不收尾（热重载幂等）');
+
+  // b) pending 早于本进程诞生 ⇒ 宿主确实重启过 ⇒ 落定，且不记录/打开任何新地址
+  const ancient = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  writeFileSync(STATE, JSON.stringify({ pending: { requestedAt: ancient } }), 'utf8');
+  host.apply(mockCtx());
+  const st = JSON.parse(readFileSync(STATE, 'utf8'));
+  ok(st.pending === null, 'pending 早于进程启动 ⇒ 收尾清空');
+  ok(st.lastRestart && st.lastRestart.ok === true && st.lastRestart.reason === 'restarted', '结论 = 重启成功');
+  ok(!('url' in (st.lastRestart || {})) && !('opened' in (st.lastRestart || {})), '不再取 token URL、不再打开新页面');
 }
 
 console.log('[7] client 半：bundle 自注册');
@@ -82,7 +102,7 @@ ok(captured && captured.id === 'dsh-restart-button', 'bundle 自注册 id 正确
 
 console.log('[8] client 半：渲染（4 条状态路径）');
 function renderWith(status) {
-  const queue = [status, null, false, false, null, false];
+  const queue = [status, null, false, false, null, false, false];
   let i = 0;
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
@@ -107,20 +127,20 @@ ok(empty.mod.inject.includes('slots') && empty.slot === 'settings.section', 'inj
 ok(empty.meta.id === 'dsh-restart-button' && empty.meta.label() === '重启 DSH', '注册元数据正确');
 ok(empty.text.includes('读取中') && !empty.text.includes('重启 DSH Web'), '未加载态渲染正常、不抛异常');
 
-const ready = renderWith({ unit: 'dsh-web.service', ruleHint: 'readable', autoOpen: true, pending: false,
-  lastRestart: { finishedAt: '2026-10-08T14:00:12.000Z', url: 'http://127.0.0.1:3099/?token=AbC_-123', ok: true, opened: true } });
+const ready = renderWith({ unit: 'dsh-web.service', ruleHint: 'readable', pending: false,
+  lastRestart: { finishedAt: '2026-10-08T14:00:12.000Z', ok: true } });
 ok(ready.text.includes('重启 DSH Web'), '就绪态：渲染出重启按钮');
 ok(ready.text.includes('polkit 规则已就绪'), '就绪态：徽标 ok');
-ok(ready.text.includes('自动打开新地址'), '就绪态：开关存在');
-ok(ready.text.includes('http://127.0.0.1:3099/?token=AbC_-123'), '就绪态：显示新地址');
+ok(ready.text.includes('自动重连'), '就绪态：提示依赖浏览器自带重连');
+ok(!ready.text.includes('自动打开新地址') && !ready.text.includes('新地址'), '就绪态：不再有「开新页面/新地址」入口');
 ok(ready.text.includes('重启成功'), '就绪态：结论=重启成功');
 
-const missing = renderWith({ unit: 'dsh-web.service', ruleHint: 'missing', autoOpen: false, pending: false, lastRestart: null });
+const missing = renderWith({ unit: 'dsh-web.service', ruleHint: 'missing', pending: false, lastRestart: null });
 ok(missing.text.includes('缺少 polkit 规则'), 'ruleHint=missing → 警示徽标');
 ok(missing.text.includes('重启 DSH Web'), 'missing 时按钮仍可用（不误拦）');
 
-const failed = renderWith({ unit: 'dsh-web.service', ruleHint: 'unknown', autoOpen: true, pending: false,
-  lastRestart: { finishedAt: '2026-10-08T14:00:12.000Z', url: null, ok: false, opened: false, reason: 'restart-not-taken' } });
+const failed = renderWith({ unit: 'dsh-web.service', ruleHint: 'unknown', pending: false,
+  lastRestart: { finishedAt: '2026-10-08T14:00:12.000Z', ok: false, reason: 'restart-not-taken' } });
 ok(failed.text.includes('重启未生效'), '自愈结论在 UI 上可见');
 
 // 清理

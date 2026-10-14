@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-button",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DSH Web 重启按钮：设置页一键重启 dsh-web.service（走 polkit 常驻授权，不依赖市场的一键重启）",
   "type": "module",
   "main": "lib/index.js",

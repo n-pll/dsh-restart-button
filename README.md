@@ -11,13 +11,13 @@ DSH Web 的**重启按钮**：在「设置」里点一下重启宿主 `dsh-web.s
 该助手会被 cgroup 一起杀掉，还可能和 systemd 抢端口（市场 README 的 #229/#471）。
 
 本插件换一条路：**只负责发出 `systemctl restart`，重启本身仍由 systemd 完成**。
+而且**不打开任何新页面**：浏览器侧本来就有重连机制，正常重启后原页面会自己连回来。
 
 ## 结构
 
 - **host 半**（`lib/index.js`）
-  - `GET  /api/dsh-restart/status` — 上次重启结果、自愈判定、自动打开设置
+  - `GET  /api/dsh-restart/status` — 上次重启结果、自愈判定
   - `POST /api/dsh-restart/restart` — 落盘 pending → 触发 `systemctl restart dsh-web` → 202
-  - `PUT  /api/dsh-restart/settings` — 保存「重启完成后自动打开新地址」
 - **client 半**（`lib/client.js`）— 在 `settings.section` 注册「重启 DSH」分区
 - **system/**（`49-dsh-web-restart.rules.tmpl` + `install-rule.sh`）— polkit 授权
 - **test/validate.mjs** — 自测（`node test/validate.mjs`）
@@ -59,12 +59,26 @@ sudo systemctl restart polkit
 3. **`systemctl --dry-run` 不做 polkit 检查**：对已授权与未授权都静默 exit 0，
    不能拿它当授权探针。
 
+> 版本注：1.1.0 移除「读 journald 取新 token → 打开浏览器」整条链路（含
+> `PUT /api/dsh-restart/settings`）；重启后由浏览器自带重连恢复。
+
 ## 为什么不需要「脱离终端的助手」
 
 `systemctl restart` 只把任务**入队**给 PID 1（systemd 在 cgroup 之外）；
 即使本进程随后被 cgroup 停掉，重启任务照样跑完。
-重启后的收尾——取新 token URL、必要时打开浏览器——由**新宿主启动时**本插件的
-`apply()` 完成（读 `state.json` 里的 pending 标记），因此不依赖任何存活助手。
+重启后的收尾只剩一件事：把 `state.json` 里的 pending 落定，由**新宿主启动时**本插件的
+`apply()` 完成（用「本进程启动时刻是否晚于 pending」判定），因此不依赖任何存活助手。
+
+## 为什么不打开新页面
+
+页面的 `?token=...` 只在 `GET /` 交换一次：交换后立即写入 30 天期的签名 cookie，
+而 cookie 的签名密钥持久化在 `$DSH_HOME/.credentials.yaml`，跨重启不变。
+所以重启后**原页面带 cookie 请求仍然是已认证的**：WebSocket 一断，客户端就按
+500ms→1s→2s→4s→8s→10s 的抖动重试直到恢复，无需新窗口。
+
+早期版本用 `journalctl` 找新 token URL 再 `Start-Process` 打开浏览器，结果是：
+要么在浏览器里多开一个会话（多一个连接、多个页面），要么因为 `powershell.exe`
+不可用而静默失败。1.1.0 起整块移除，重启按钮只做「下发重启 + 记录结果」。
 
 ## 自愈：怎么发现「点了没反应」
 
@@ -72,7 +86,8 @@ sudo systemctl restart polkit
 若重启因故未生效（例如 polkit 规则缺失），宿主根本不会重启，`pending` 会一直留着。
 于是 `GET /status` 在 **超过 20 秒**仍见 `pending` 时判为
 `restart-not-taken`，清掉 pending 并在界面上如实显示「**重启未生效**」。
-前端在重启窗口内每 3 秒轮询一次，所以这条结论会自动出现。
+前端在重启窗口内每 3 秒轮询一次，所以这条结论会自动出现；
+反过来，若 pending 被清空（重启真的发生了），界面会自动从「重启进行中」归位。
 
 ## 安装
 
@@ -92,15 +107,16 @@ dsh-restart          # 若已有该命令；否则 systemctl restart dsh-web
 node test/validate.mjs
 ```
 
-覆盖：路由注册、HTTP 同源/环回栅栏（5 类拒绝）、自愈判定、client 渲染（4 条状态路径）。
+覆盖：路由注册（2 条 + 已移除 settings 端点）、HTTP 同源/环回栅栏（5 类拒绝）、
+自愈判定、两段式收尾（热重载幂等 / 真重启落定且不开新页面）、client 渲染（4 条状态路径）。
 
 ## 安全边界
 
-- 重启/设置接口只接受**本机环回 + 同源 Origin**，拒绝转发头（与 dsh-market 同一套栅栏）
+- 重启接口只接受**本机环回 + 同源 Origin**，拒绝转发头（与 dsh-market 同一套栅栏）
 - 命令写死为 `systemctl restart dsh-web.service`，**没有任何用户输入进入 argv**
-- 打开浏览器前对 URL 做白名单校验（仅 `127.0.0.1|localhost|[::1]`）
+- 插件自身不做任何「打开 URL / 拉起浏览器」的动作（1.1.0 起已无 `execFile` 调用）
 - polkit 授权面收窄到单一用户 + 单一 unit + 单一 verb
-- `state/` 是运行时数据（可能含启动 token），已在 `.gitignore` 中排除
+- `state/` 只存重启记录 / pending 标记，已在 `.gitignore` 中排除
 - 界面路径：设置 → **重启 DSH**
 
 ## License
