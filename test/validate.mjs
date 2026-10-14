@@ -91,6 +91,11 @@ console.log('[6b] host 半：两段式收尾（按进程启动时刻判定，不
   ok(st.pending === null, 'pending 早于进程启动 ⇒ 收尾清空');
   ok(st.lastRestart && st.lastRestart.ok === true && st.lastRestart.reason === 'restarted', '结论 = 重启成功');
   ok(!('url' in (st.lastRestart || {})) && !('opened' in (st.lastRestart || {})), '不再取 token URL、不再打开新页面');
+
+  // c) 1.0.0 遗留的 autoOpen 键：任何一次写入都会把它清掉
+  writeFileSync(STATE, JSON.stringify({ autoOpen: false, pending: { requestedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() } }), 'utf8');
+  host.apply(mockCtx());
+  ok(!('autoOpen' in JSON.parse(readFileSync(STATE, 'utf8'))), '写入时清掉遗留的 autoOpen 键');
 }
 
 console.log('[7] client 半：bundle 自注册');
@@ -134,6 +139,15 @@ ok(ready.text.includes('polkit 规则已就绪'), '就绪态：徽标 ok');
 ok(ready.text.includes('自动重连'), '就绪态：提示依赖浏览器自带重连');
 ok(!ready.text.includes('自动打开新地址') && !ready.text.includes('新地址'), '就绪态：不再有「开新页面/新地址」入口');
 ok(ready.text.includes('重启成功'), '就绪态：结论=重启成功');
+
+// 时间必须是「本地时区」，不是把 UTC 的 ISO 直接切一刀（东八区会慢 8 小时）
+const localOf = (iso) => { const d = new Date(iso); const p = (n) => (n < 10 ? '0' : '') + n;
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()); };
+const ISO = '2026-10-08T14:00:12.000Z';
+ok(ready.text.includes(localOf(ISO)), '时间按本地时区渲染（' + localOf(ISO) + '）');
+if (new Date().getTimezoneOffset() !== 0) {
+  ok(!ready.text.includes('2026-10-08 14:00:12'), '非 UTC 时区下不再显示 UTC 墙钟时间');
+}
 
 const missing = renderWith({ unit: 'dsh-web.service', ruleHint: 'missing', pending: false, lastRestart: null });
 ok(missing.text.includes('缺少 polkit 规则'), 'ruleHint=missing → 警示徽标');
